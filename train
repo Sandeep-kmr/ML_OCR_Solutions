@@ -1,0 +1,77 @@
+#traing file
+
+from wand.image import Image
+from wand.color import Color
+from tesserocr import PyTessBaseAPI
+
+import logging
+
+
+import os
+import sys
+
+logger = logging.getLogger("web2py.app.OCR2")
+logger.setLevel(logging.INFO)
+
+imgConfig = [200,300,400,450,700]
+
+def getFilesFromDir(dirPath):
+    return os.listdir(dirPath)
+
+def removeAllImageFiles(dirPath):
+    files = os.listdir(dirPath)
+    for f in files:
+        if f.endswith('.jpg'):
+            os.remove(os.path.join( dirPath, f ))
+
+def getAllImageFiles(dirPath):
+    return [f for f in os.listdir(dirPath) if f.endswith('.jpg')]
+
+def printTIFF(inputFile,outputFile):
+    with Image(filename=inputFile,resolution=200) as img:
+        img.modulate(brightness=90)
+        img.transparentize(0.0)
+        #img.transform('300%')
+        img.background_color = Color("white")
+        img.depth = 8
+        img.alpha_channel = 'off'
+        img.save(filename = outputFile)
+
+
+
+def getTextFromImg(imgPath):
+    imgfiles = getAllImageFiles(imgPath)
+    wordlist = []
+    for onepage in imgfiles:
+        with PyTessBaseAPI(lang='eng') as api:
+            api.SetImageFile('{folder}/{file}'.format(folder=imgPath,file=onepage))
+            api.Recognize()
+            wordlisttemp = api.AllWords()
+            api.End()
+            wordlist.extend([word for word in wordlisttemp if word != ' '])
+    removeAllImageFiles(imgPath)
+    return " ".join(wordlist)
+
+
+
+def writeToFile(text,fileName):
+    with open(fileName,'w') as textFile:
+        textFile.write(str(text))
+
+
+logging.info('document training has been started')
+pdfLocation = sys.argv[1]
+logging.info('input files location {}'.format(pdfLocation))
+templocation = sys.argv[2]
+logging.info('temp  location {}'.format(templocation))
+kbLocation  = sys.argv[3]
+logging.info('knowledge base location {}'.format(kbLocation))
+
+inputfiles = getFilesFromDir(pdfLocation) # get list of files for training
+
+for onefile in inputfiles:
+        print('processing {}'.format(onefile))
+        for oneconfig in imgConfig:
+            printTIFF('{dir}/{filename}'.format(dir=pdfLocation,filename=onefile),'{dir}/temp.jpg'.format(dir=templocation))
+            text = getTextFromImg('{dir}'.format(dir=templocation))
+            writeToFile(text.encode(),'{dir}/{filename}___{config}'.format(dir=kbLocation,filename=onefile.split('.')[0],config=oneconfig))
