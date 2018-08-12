@@ -1,0 +1,192 @@
+import logging
+
+
+from wand.image import Image
+from wand.color import Color
+from tesserocr import PyTessBaseAPI
+import tesserocr
+from textblob.classifiers import NaiveBayesClassifier
+from gluon.contrib.appconfig import AppConfig
+import re
+
+
+import os
+import csv
+import time
+import sys
+
+logger = logging.getLogger("web2py.app.ocr")
+logger.setLevel(logging.DEBUG)
+
+logger.info("Document Classification & OCR Engine has been started")
+
+
+
+imgConfig = [200,300,400,450,700]
+
+
+
+train = []
+allStr = ""
+kbLocation = sys.argv[1]
+inputLocation = sys.argv[2]
+tempLocation = sys.argv[3]
+printdata = True if sys.argv[4] == 'True' else False
+
+logger.info("Knowledge Base Location {}".format(kbLocation))
+logger.info("Input Files Location {}".format(inputLocation))
+logger.info("Temp/Output Files Location {}".format(tempLocation))
+logger.info("Print Data for Training {}".format(printdata))
+
+
+myconfig = AppConfig(reload=True)
+
+
+
+def getFilesFromDir(dirPath):
+        return os.listdir(dirPath)
+
+def getAllImageFiles(dirPath):
+    return [f for f in os.listdir(dirPath) if f.endswith('.jpg')]
+
+def removeAllImageFiles(dirPath):
+    files = os.listdir(dirPath)
+    for f in files:
+        if f.endswith('.jpg'):
+            os.remove(os.path.join( dirPath, f ))
+
+def trainClassifier(kbLocation):
+    files = os.listdir(kbLocation)
+    for oneFile in files:
+        with open('{dir}/{fileName}'.format(dir=kbLocation,fileName=oneFile),'r') as rfile:
+            global allStr
+            data = rfile.read()
+            train.append((data,oneFile.split('___')[0]))
+            allStr=allStr+data
+
+
+def printTIFF(inputFile,outputFile,resolution=200):
+    with Image(filename=inputFile,resolution=resolution) as img:
+        img.modulate(brightness=90)
+        img.transparentize(1.0)
+        img.background_color = Color("white")
+        img.depth = 8
+        img.alpha_channel = 'off'
+        img.save(filename = outputFile)
+
+
+
+def getTextFromImg(imgPath):
+    imgfiles = getAllImageFiles(imgPath)
+    wordlist = []
+    wordlistConfidence = []
+    for onepage in imgfiles:
+        with PyTessBaseAPI(lang='eng') as api:
+            api.ReadConfigFile('myconfig')
+            api.SetImageFile('{folder}/{file}'.format(folder=imgPath,file=onepage))
+            api.Recognize()
+            wordlistConfidencetemp = api.MapWordConfidences()
+            wordlisttemp = api.AllWords()
+            api.End()
+            wordlist.extend([word for word in wordlisttemp if word != ' '])
+            wordlistConfidence.extend([word for word in wordlistConfidencetemp if word[0] != ' '])
+    removeAllImageFiles(imgPath)
+    return (wordlist,wordlistConfidence)
+
+def cleanData(data):
+    returndict = {}
+    for onedict in data:
+        if onedict['validation'] == 'True':
+            returndict = onedict
+            break
+    for key in returndict.keys():
+        if not key.endswith('_number') and key != 'file' and key != 'name' and key != 'validation' and not key.endswith('_conf'):
+                value = None
+                conf  = 0
+                for onedict in data:
+                    if onedict[key+'_conf'] > conf:
+                        value = onedict[key]
+                        conf  = onedict[key+'_conf']
+                returndict[key] = value
+                returndict[key+'_conf'] = conf
+    return returndict
+
+
+def writeToCSV(data,filename):
+    with open('{dir}/{filename}.csv'.format(dir=tempLocation,filename=filename), 'w') as csvfile:
+        writer = csv.writer(csvfile, delimiter=',', quotechar='"', quoting=csv.QUOTE_ALL)
+        head = []
+        if data:
+            head = data[0].keys()
+            writer.writerow(data[0].keys())
+        for row in data:
+            if row:
+                onerow =[]
+                for key in head:
+                    onerow.append((row[key].encode('ascii', 'ignore').decode("utf-8", "ignore")) if isinstance(row[key],str) else row[key])
+                writer.writerow(onerow)
+
+def getConfidence(string,confList):
+    if string == None:
+        return 0
+    wordlist = string.split('#@@#')
+    conf = [ c[1] for c in confList if c[0] in wordlist]
+    if len(conf) == 0:
+        return 0
+    return sum(conf)/len(conf)
+
+
+trainClassifier(kbLocation)
+cl = NaiveBayesClassifier(train)
+docs  = getFilesFromDir(inputLocation)
+
+logger.info("Total Files in Input Folder {}".format(len(docs)))
+
+for onepdf in docs:
+    logger.info("Processing File Named : {}".format(onepdf))
+    outputlist = []
+    try:
+        for resolution in imgConfig:
+            logger.info("Processing File Named : {} with resolution {}".format(onepdf,resolution))
+            printTIFF('{dir}/{filename}'.format(dir=inputLocation,filename=onepdf),'{dir}/temp.jpg'.format(dir=tempLocation),resolution)
+            text = getTextFromImg('{dir}'.format(dir=tempLocation))
+            org=cl.classify(" ".join(text[0]))
+            logger.info("Processing File Named : {} with resolution {} : Identified Org Name {} ".format(onepdf,resolution,org))
+            config = myconfig[org] if org in myconfig.keys() else None
+
+            if config != None:
+                print(config)
+                data = "#@START@#"+"#@@#".join(text[0])+"#@END@#"
+                if printdata:
+                    print(data)
+                result = {}
+                result['file'] = onepdf
+                result['name'] = org
+                for key in config:
+                    if key != 'validation' and key !='text_fields':
+                        matchObj = re.match(config[key],data,re.M|re.I)
+                        if matchObj:
+                            result[key] = matchObj.group(1).replace('#@@#',' ')
+                            result[key+'_conf'] = getConfidence(matchObj.group(1),text[1])
+                            #if printdata:
+                            #    print('{}:{}'.format(key,result[key]))
+
+                        else:
+                            result[key] = ""
+                            result[key+'_conf']=0
+                    else:
+                        try:
+                            result['validation']=str(eval(config[key]))
+                        except Exception as e:
+                            logger.error("Oops, something went wrong {} ".format(str(e)))
+                            result['validation']=str('False')
+
+
+            else:
+                logger.error("There is no configuration for org named {}".format(org))
+            outputlist.append(result)
+    except Exception as e:
+        logger.error("Oops, something went wrong {} ".format(str(e)))
+    rec  = cleanData(outputlist)
+    outputlist.append(rec)
+    writeToCSV(outputlist,onepdf)
